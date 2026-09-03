@@ -2,23 +2,26 @@ const express = require('express');
 const mineflayer = require('mineflayer');
 
 // ==========================================
-// 1. CẤU HÌNH SERVER & DANH SÁCH BOT
+// 1. CẤU HÌNH SERVER, BOT & AI BRAIN
 // ==========================================
 const CONFIG = {
   host: process.env.MC_HOST || 'node.healthrecords.id.vn',
   port: parseInt(process.env.MC_PORT || '25641'),
   version: false,
   botPassword: process.env.MC_BOT_PASSWORD || 'MatKhauBot123',
-  reconnectDelayMs: 15000
+  reconnectDelayMs: 15000,
+  // Key OpenRouter có sẵn trên máy của bạn
+  openRouterKey: process.env.OPENROUTER_API_KEY || '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',
+  // Model AI miễn phí, tư duy cực nhanh và nhạy bén
+  aiModel: process.env.AI_MODEL || 'nvidia/nemotron-3.5-lightning:free'
 };
 
-// Danh sách tên bot sinh tồn
 const BOT_NAMES = process.env.MC_USERNAMES 
   ? process.env.MC_USERNAMES.split(',').map(s => s.trim())
   : ['RayLight431', 'tuantuoitre'];
 
 // ==========================================
-// 2. HTTP SERVER CHO UPTIMEROBOT KEEPALIVE
+// 2. HTTP KEEPALIVE SERVER CHO UPTIMEROBOT
 // ==========================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,7 +31,8 @@ BOT_NAMES.forEach(name => {
   botsStatus[name] = {
     connected: false,
     loggedIn: false,
-    status: 'Khởi tạo...',
+    aiThought: 'Chờ kết nối...',
+    currentAction: 'Khởi tạo...',
     updatedAt: new Date().toISOString()
   };
 });
@@ -36,7 +40,7 @@ BOT_NAMES.forEach(name => {
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
-    message: 'Hệ thống Minecraft Autonomous Survival Bot đang chạy!',
+    message: 'Hệ thống Minecraft Bot AI Thông Minh (OpenRouter AI Brain) đang chạy!',
     totalBots: BOT_NAMES.length,
     bots: botsStatus
   });
@@ -121,123 +125,204 @@ function setupAutoLogin(bot, username, onLoggedIn) {
 }
 
 // ==========================================
-// 5. AUTONOMOUS SURVIVAL ENGINE (ĐI SINH TỒN, KHÁM PHÁ, TỰ VỆ)
+// 5. BỘ NÃO AI (AI BRAIN DECISION ENGINE)
 // ==========================================
-function setupSurvivalEngine(bot, username, updateStatus) {
-  let isExploring = false;
+async function askAIBrain(username, sensoryData) {
+  if (!CONFIG.openRouterKey) return null;
+
+  try {
+    const prompt = `You are an intelligent Minecraft survival player named "${username}".
+Current Sensory Status:
+- Health: ${sensoryData.health}/20
+- Food/Hunger: ${sensoryData.food}/20
+- Time of Day: ${sensoryData.isDay ? 'Daytime (Safe)' : 'Nighttime (Dangerous)'}
+- Nearby Threats: ${sensoryData.threatSummary}
+- Nearby Players: ${sensoryData.playerSummary}
+- Position: X=${sensoryData.x}, Y=${sensoryData.y}, Z=${sensoryData.z}
+
+Decide your next action. You must reply ONLY with a valid JSON object matching this schema:
+{"thought": "concise 1-sentence reason in Vietnamese or English", "action": "explore" | "flee" | "fight" | "watch_player"}`;
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.openRouterKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: CONFIG.aiModel,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await response.json();
+    if (data && data.choices && data.choices[0] && data.choices[0].message) {
+      const content = data.choices[0].message.content.trim();
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+    }
+  } catch (err) {
+    console.warn(`[${username}] Lỗi khi hỏi AI Brain:`, err.message);
+  }
+  return null;
+}
+
+// ==========================================
+// 6. THIẾT LẬP HÀNH VI SINH TỒN THÔNG MINH
+// ==========================================
+function setupSmartSurvival(bot, username) {
+  let currentAction = 'explore';
   let currentYaw = Math.random() * Math.PI * 2;
   let stuckTicks = 0;
-  let exploreInterval = null;
+  let aiLoopTimer = null;
+  let isThinking = false;
 
-  function startExploring() {
-    if (isExploring) return;
-    isExploring = true;
-    console.log(`[${username}] Bắt đầu hành trình sinh tồn: Rời spawn và đi khám phá thế giới!`);
-    updateStatus(true, true, 'Đang đi khám phá & sinh tồn tự do');
+  function updateStatusUI(thought, action) {
+    botsStatus[username] = {
+      connected: true,
+      loggedIn: true,
+      aiThought: thought || botsStatus[username].aiThought,
+      currentAction: action || currentAction,
+      updatedAt: new Date().toISOString()
+    };
+  }
 
-    // Chọn một hướng ngẫu nhiên để rời xa spawn
+  // Chu kỳ tư duy AI mỗi 20 giây
+  async function triggerAITactics() {
+    if (!bot || !bot.entity || isThinking) return;
+    isThinking = true;
+
+    const nearestMob = bot.nearestEntity((e) => {
+      return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 16;
+    });
+
+    const nearestPlayer = bot.nearestEntity((e) => {
+      return e.type === 'player' && e.username !== bot.username && !BOT_NAMES.includes(e.username);
+    });
+
+    const sensoryData = {
+      health: Math.round(bot.health || 20),
+      food: Math.round(bot.food || 20),
+      isDay: bot.time ? bot.time.isDay : true,
+      threatSummary: nearestMob ? `${nearestMob.name || 'Monster'} cách ${Math.round(bot.entity.position.distanceTo(nearestMob.position))}m` : 'Không có nguy hiểm',
+      playerSummary: nearestPlayer ? `Người chơi ${nearestPlayer.username} cách ${Math.round(bot.entity.position.distanceTo(nearestPlayer.position))}m` : 'Đang đi một mình',
+      x: Math.round(bot.entity.position.x),
+      y: Math.round(bot.entity.position.y),
+      z: Math.round(bot.entity.position.z)
+    };
+
+    const decision = await askAIBrain(username, sensoryData);
+    isThinking = false;
+
+    if (decision && decision.action) {
+      currentAction = decision.action;
+      console.log(`[${username} AI Suy nghĩ]: "${decision.thought}" -> Hành động: [${decision.action}]`);
+      updateStatusUI(decision.thought, decision.action);
+
+      if (decision.action === 'flee' && nearestMob) {
+        const dx = bot.entity.position.x - nearestMob.position.x;
+        const dz = bot.entity.position.z - nearestMob.position.z;
+        currentYaw = Math.atan2(-dx, dz);
+        bot.look(currentYaw, 0, true);
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
+      } else if (decision.action === 'fight' && nearestMob) {
+        bot.lookAt(nearestMob.position.offset(0, nearestMob.height * 0.5, 0), true);
+        bot.attack(nearestMob);
+      } else if (decision.action === 'watch_player' && nearestPlayer) {
+        bot.setControlState('forward', false);
+        bot.lookAt(nearestPlayer.position.offset(0, 1.6, 0), true);
+        if (Math.random() < 0.4) bot.swingArm();
+      } else {
+        currentAction = 'explore';
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
+      }
+    }
+  }
+
+  bot.on('spawn', () => {
+    console.log(`[${username}] Đã vào thế giới! Bắt đầu kích hoạt AI Survival...`);
     currentYaw = Math.random() * Math.PI * 2;
     bot.look(currentYaw, 0, true);
     bot.setControlState('forward', true);
     bot.setControlState('sprint', true);
 
-    // Cứ mỗi 15-20 giây đổi hướng nhẹ để lượn theo địa hình tự nhiên
-    if (exploreInterval) clearInterval(exploreInterval);
-    exploreInterval = setInterval(() => {
-      if (!bot || !bot.entity) return;
-      currentYaw += (Math.random() * 1.4 - 0.7);
-      bot.look(currentYaw, 0, true);
+    if (aiLoopTimer) clearInterval(aiLoopTimer);
+    aiLoopTimer = setInterval(triggerAITactics, 20000);
+    setTimeout(triggerAITactics, 4000);
+  });
 
-      // Thi thoảng vung tay như đang cầm đuốc/vũ khí
-      if (Math.random() < 0.3) {
-        bot.swingArm();
-      }
-    }, 15000);
-  }
-
-  // Tự động xử lý vật lý vượt địa hình
   bot.on('physicsTick', () => {
-    if (!isExploring || !bot.entity) return;
+    if (!bot.entity) return;
 
-    // 1. Tự bơi ngoi lên nếu rơi xuống nước
     if (bot.entity.isInWater) {
       bot.setControlState('jump', true);
       bot.setControlState('sprint', false);
       return;
     }
 
-    // 2. Kiểm tra nếu bị vướng block phía trước (vận tốc di chuyển gần bằng 0)
-    const velocityHorizontal = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
-    if (velocityHorizontal < 0.02) {
-      stuckTicks++;
-      // Nhảy thử để trèo lên block 1 bậc
-      bot.setControlState('jump', true);
+    if (currentAction === 'explore' || currentAction === 'flee') {
+      const speedHorizontal = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
+      if (speedHorizontal < 0.02) {
+        stuckTicks++;
+        bot.setControlState('jump', true);
 
-      // Nếu kẹt lâu (tường cao, chướng ngại vật) -> quay ngoắt sang hướng khác
-      if (stuckTicks > 12) {
-        currentYaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2 + (Math.random() * 0.4));
-        bot.look(currentYaw, 0, true);
+        if (stuckTicks > 12) {
+          currentYaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2 + Math.random() * 0.4);
+          bot.look(currentYaw, 0, true);
+          stuckTicks = 0;
+        }
+      } else {
         stuckTicks = 0;
+        bot.setControlState('jump', false);
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
       }
-    } else {
-      stuckTicks = 0;
-      bot.setControlState('jump', false);
-      bot.setControlState('sprint', true);
-      bot.setControlState('forward', true);
     }
 
-    // 3. Tự vệ nếu có quái vật lại gần trong 3.5 block
-    const hostileMob = bot.nearestEntity((e) => {
-      return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.5;
+    const closeMonster = bot.nearestEntity((e) => {
+      return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.2;
     });
-    if (hostileMob) {
-      bot.lookAt(hostileMob.position.offset(0, hostileMob.height * 0.5, 0), true);
-      bot.attack(hostileMob);
+    if (closeMonster) {
+      bot.lookAt(closeMonster.position.offset(0, closeMonster.height * 0.5, 0), true);
+      bot.attack(closeMonster);
     }
   });
 
-  // Khi chết: Tự động hồi sinh sau 2 giây và tiếp tục chạy đi sinh tồn tiếp
   bot.on('death', () => {
-    console.log(`[${username}] Bot bị chết. Tự động hồi sinh sau 2 giây...`);
-    updateStatus(true, true, 'Đã tử nạn -> Đang tự hồi sinh');
-    isExploring = false;
+    console.log(`[${username}] Bot bị chết. Tự động hồi sinh sau 2s...`);
+    updateStatusUI('Vừa tử nạn, đang hồi sinh...', 'respawning');
     bot.clearControlStates();
 
     setTimeout(() => {
       bot.respawn();
-      setTimeout(startExploring, 3000);
+      setTimeout(() => {
+        currentAction = 'explore';
+        bot.setControlState('forward', true);
+        bot.setControlState('sprint', true);
+      }, 3000);
     }, 2000);
   });
 
   bot.on('end', () => {
-    isExploring = false;
-    if (exploreInterval) {
-      clearInterval(exploreInterval);
-      exploreInterval = null;
+    if (aiLoopTimer) {
+      clearInterval(aiLoopTimer);
+      aiLoopTimer = null;
     }
   });
-
-  return { startExploring };
 }
 
 // ==========================================
-// 6. KHỞI TẠO VÀ QUẢN LÝ TỪNG BOT
+// 7. KHỞI TẠO TỪNG BOT
 // ==========================================
 function createManagedBot(username) {
   let bot = null;
 
-  function updateStatus(connected, loggedIn, statusText) {
-    botsStatus[username] = {
-      connected,
-      loggedIn,
-      status: statusText,
-      updatedAt: new Date().toISOString()
-    };
-  }
-
   function start() {
     console.log(`[${username}] Đang kết nối tới ${CONFIG.host}:${CONFIG.port}...`);
-    updateStatus(false, false, `Đang kết nối tới ${CONFIG.host}:${CONFIG.port}`);
 
     try {
       bot = mineflayer.createBot({
@@ -247,49 +332,28 @@ function createManagedBot(username) {
         version: CONFIG.version
       });
     } catch (err) {
-      console.error(`[${username}] Lỗi khi khởi tạo:`, err.message);
+      console.error(`[${username}] Lỗi khởi tạo:`, err.message);
       scheduleReconnect();
       return;
     }
 
     setupResourcePackBypass(bot, username);
+    setupSmartSurvival(bot, username);
 
-    const survivalEngine = setupSurvivalEngine(bot, username, updateStatus);
-
-    // Đăng nhập xong là chuẩn bị cắm đầu chạy
     setupAutoLogin(bot, username, () => {
-      console.log(`[${username}] Đăng nhập hoàn tất! Bắt đầu xuất phát...`);
-      setTimeout(() => {
-        survivalEngine.startExploring();
-      }, 3000);
-    });
-
-    bot.on('login', () => {
-      console.log(`[${username}] Đã kết nối vào server.`);
-      updateStatus(true, false, 'Đã vào server');
-    });
-
-    bot.on('spawn', () => {
-      console.log(`[${username}] Đã spawn vào thế giới.`);
-      // Dự phòng nếu không có plugin login thì 5s sau tự chạy luôn
-      setTimeout(() => {
-        survivalEngine.startExploring();
-      }, 5000);
+      console.log(`[${username}] Xác thực thành công! Sẵn sàng hành động.`);
     });
 
     bot.on('kicked', (reason) => {
       console.warn(`[${username}] Bị kick:`, reason);
-      updateStatus(false, false, `Bị kick: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`);
     });
 
     bot.on('error', (err) => {
       console.error(`[${username}] Lỗi:`, err.message);
-      updateStatus(false, false, `Lỗi: ${err.message}`);
     });
 
     bot.on('end', (reason) => {
-      console.log(`[${username}] Ngắt kết nối (${reason}). Sẽ kết nối lại...`);
-      updateStatus(false, false, `Ngắt kết nối (${reason})`);
+      console.log(`[${username}] Ngắt kết nối (${reason}). Sẽ kết nối lại sau ${CONFIG.reconnectDelayMs / 1000}s...`);
       scheduleReconnect();
     });
   }
@@ -304,7 +368,7 @@ function createManagedBot(username) {
   start();
 }
 
-console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot sinh tồn: ${BOT_NAMES.join(', ')}`);
+console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot AI: ${BOT_NAMES.join(', ')}`);
 BOT_NAMES.forEach((name, index) => {
   setTimeout(() => {
     createManagedBot(name);
