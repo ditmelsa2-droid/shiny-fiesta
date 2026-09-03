@@ -7,7 +7,7 @@ const mineflayer = require('mineflayer');
 const CONFIG = {
   host: process.env.MC_HOST || 'node.healthrecords.id.vn',
   port: parseInt(process.env.MC_PORT || '25641'),
-  version: false,
+  version: process.env.MC_VERSION || '1.21.1',
   botPassword: process.env.MC_BOT_PASSWORD || 'MatKhauBot123',
   reconnectDelayMs: 15000,
   // Key OpenRouter có sẵn trên máy của bạn
@@ -396,10 +396,25 @@ function setupSmartSurvival(bot, username) {
 }
 
 // ==========================================
-// 7. KHỞI TẠO TỪNG BOT
+// 7. KHỞI TẠO TỪNG BOT (WATCHDOG + RECONNECT)
 // ==========================================
 function createManagedBot(username) {
   let bot = null;
+  let reconnectTimer = null;
+  let watchdogTimer = null;
+  let isReconnecting = false;
+
+  function scheduleReconnect(delayMs) {
+    if (isReconnecting) return;
+    isReconnecting = true;
+    if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+    const delay = (delayMs || CONFIG.reconnectDelayMs) + Math.floor(Math.random() * 3000);
+    console.log(`[${username}] Reconnect sau ${Math.round(delay/1000)}s...`);
+    reconnectTimer = setTimeout(() => {
+      isReconnecting = false;
+      start();
+    }, delay);
+  }
 
   function start() {
     console.log(`[${username}] Đang kết nối tới ${CONFIG.host}:${CONFIG.port}...`);
@@ -409,7 +424,8 @@ function createManagedBot(username) {
         host: CONFIG.host,
         port: CONFIG.port,
         username: username,
-        version: CONFIG.version
+        version: CONFIG.version,
+        hideErrors: true  // Không log spam packet lỗi ra console
       });
     } catch (err) {
       console.error(`[${username}] Lỗi khởi tạo:`, err.message);
@@ -417,32 +433,56 @@ function createManagedBot(username) {
       return;
     }
 
+    // ---- Bắt lỗi tại nguồn: packet parse error → reconnect thay vì chết im ----
+    if (bot._client) {
+      bot._client.on('error', (err) => {
+        const msg = err?.message || String(err);
+        if (msg.includes('PartialReadError') || msg.includes('Read error') || msg.includes('undefined')) {
+          console.warn(`[${username}] Packet lỗi, reconnect...`);
+          scheduleReconnect(5000);
+        } else {
+          console.error(`[${username}] Client error:`, msg.substring(0, 80));
+        }
+      });
+    }
+
+    // ---- WATCHDOG: nếu sau 45s không spawn được → reconnect ----
+    watchdogTimer = setTimeout(() => {
+      if (!bot || !bot.entity) {
+        console.warn(`[${username}] Watchdog: 45s không spawn được, reconnect!`);
+        try { bot.quit(); } catch (_) {}
+        scheduleReconnect(3000);
+      }
+    }, 45000);
+
     setupResourcePackBypass(bot, username);
     setupSmartSurvival(bot, username);
-
     setupAutoLogin(bot, username, () => {
       console.log(`[${username}] Xác thực thành công! Sẵn sàng hành động.`);
     });
 
+    bot.on('spawn', () => {
+      // Spawn OK → cancel watchdog
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+      botsStatus[username] = { ...botsStatus[username], connected: true };
+    });
+
     bot.on('kicked', (reason) => {
-      console.warn(`[${username}] Bị kick:`, reason);
+      console.warn(`[${username}] Bị kick:`, String(reason).substring(0, 80));
     });
 
     bot.on('error', (err) => {
-      console.error(`[${username}] Lỗi:`, err.message);
+      const msg = err?.message || String(err);
+      if (!msg.includes('PartialReadError') && !msg.includes('Read error')) {
+        console.error(`[${username}] Bot error:`, msg.substring(0, 80));
+      }
     });
 
     bot.on('end', (reason) => {
-      console.log(`[${username}] Ngắt kết nối (${reason}). Sẽ kết nối lại sau ${CONFIG.reconnectDelayMs / 1000}s...`);
+      console.log(`[${username}] Ngắt kết nối (${reason}).`);
+      if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
       scheduleReconnect();
     });
-  }
-
-  function scheduleReconnect() {
-    const delay = CONFIG.reconnectDelayMs + Math.floor(Math.random() * 5000);
-    setTimeout(() => {
-      start();
-    }, delay);
   }
 
   start();
@@ -450,7 +490,19 @@ function createManagedBot(username) {
 
 console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot AI: ${BOT_NAMES.join(', ')}`);
 BOT_NAMES.forEach((name, index) => {
+  // Mỗi bot khởi động độc lập, cách nhau 8s để tránh spam login
   setTimeout(() => {
     createManagedBot(name);
-  }, index * 5000);
+  }, index * 8000);
 });
+
+// Global safety net - chỉ log, không làm gì thêm
+process.on('uncaughtException', (err) => {
+  const msg = err?.message || String(err);
+  console.warn('[Global] uncaughtException (bỏ qua):', msg.substring(0, 100));
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason?.message || String(reason);
+  console.warn('[Global] unhandledRejection (bỏ qua):', msg.substring(0, 100));
+});
+
