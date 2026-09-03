@@ -2,22 +2,25 @@ const express = require('express');
 const mineflayer = require('mineflayer');
 
 // ==========================================
-// 1. CẤU HÌNH SERVER & BOT MINECRAFT
+// 1. CẤU HÌNH SERVER & DANH SÁCH BOT
 // ==========================================
 const CONFIG = {
-  // Địa chỉ server Minecraft của bạn
-  host: process.env.MC_HOST || 'ply.healthrecords.id.vn',
-  // Cổng server (mặc định 25565)
-  port: parseInt(process.env.MC_PORT || '25565'),
-  // Tên hiển thị của bot trong game
-  username: process.env.MC_USERNAME || 'Bot_AFK',
-  // Tự động nhận diện phiên bản game (để false)
+  // Địa chỉ máy chủ (đã check SRV record)
+  host: process.env.MC_HOST || 'node.healthrecords.id.vn',
+  // Cổng máy chủ (port SRV là 25641)
+  port: parseInt(process.env.MC_PORT || '25641'),
+  // Tự động nhận diện phiên bản Minecraft
   version: false,
-  // Lệnh đăng nhập nếu server dùng AuthMe / nLogin (nếu không có thì để trống "")
-  loginCommand: process.env.MC_LOGIN_CMD || '', // Ví dụ: '/login MatKhau123'
-  // Thời gian chờ tự kết nối lại nếu bị kick hoặc server reload (mili-giây)
+  // Mật khẩu chung cho các bot đăng ký/đăng nhập
+  botPassword: process.env.MC_BOT_PASSWORD || 'MatKhauBot123',
+  // Thời gian chờ trước khi kết nối lại nếu bị kick (mili-giây)
   reconnectDelayMs: 15000
 };
+
+// Danh sách tên bot giống người thật
+const BOT_NAMES = process.env.MC_USERNAMES 
+  ? process.env.MC_USERNAMES.split(',').map(s => s.trim())
+  : ['RayLight431', 'tuantuoitre'];
 
 // ==========================================
 // 2. HTTP SERVER CHO UPTIMEROBOT KEEPALIVE
@@ -25,18 +28,22 @@ const CONFIG = {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let botStatus = {
-  connected: false,
-  username: CONFIG.username,
-  lastEvent: 'Khởi tạo tiến trình...',
-  updatedAt: new Date().toISOString()
-};
+const botsStatus = {};
+BOT_NAMES.forEach(name => {
+  botsStatus[name] = {
+    connected: false,
+    loggedIn: false,
+    lastEvent: 'Khởi tạo...',
+    updatedAt: new Date().toISOString()
+  };
+});
 
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
-    message: 'Bot Minecraft Keepalive Web Service đang chạy!',
-    bot: botStatus
+    message: 'Hệ thống Minecraft AFK Bot (Bypass Pack & Auto-Login) đang chạy!',
+    totalBots: BOT_NAMES.length,
+    bots: botsStatus
   });
 });
 
@@ -45,92 +52,183 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 3. KHỞI TẠO VÀ QUẢN LÝ BOT MINECRAFT
+// 3. XỬ LÝ RESOURCE PACK (BỎ QUA TẢI FILE NẶNG)
 // ==========================================
-let bot = null;
-let antiAfkInterval = null;
-
-function startBot() {
-  console.log(`[Bot] Đang thử kết nối tới ${CONFIG.host}:${CONFIG.port} với tên "${CONFIG.username}"...`);
-  botStatus.lastEvent = `Đang kết nối tới ${CONFIG.host}:${CONFIG.port}`;
-  botStatus.updatedAt = new Date().toISOString();
-
-  try {
-    bot = mineflayer.createBot({
-      host: CONFIG.host,
-      port: CONFIG.port,
-      username: CONFIG.username,
-      version: CONFIG.version
-    });
-  } catch (err) {
-    console.error('[Bot Error khi tạo]:', err.message);
-    scheduleReconnect();
-    return;
-  }
-
-  bot.on('login', () => {
-    console.log(`[Bot] Đã đăng nhập thành công vào server với tên: ${bot.username}`);
-    botStatus.connected = true;
-    botStatus.lastEvent = 'Đã đăng nhập vào server';
-    botStatus.updatedAt = new Date().toISOString();
+function setupResourcePackBypass(bot, username) {
+  // 1. Xử lý qua API tiêu chuẩn của Mineflayer
+  bot.on('resourcePack', (url, hash) => {
+    console.log(`[${username}] Server yêu cầu Resource Pack -> Báo đã tải xong (không tải file nặng)...`);
+    try {
+      if (typeof bot.acceptResourcePack === 'function') {
+        bot.acceptResourcePack();
+      }
+    } catch (e) {
+      console.warn(`[${username}] Lỗi acceptResourcePack:`, e.message);
+    }
   });
+
+  // 2. Xử lý hook packet cấp thấp (Hỗ trợ từ 1.16 đến 1.20+ / 1.21+)
+  if (bot._client) {
+    const handlePackPacket = (data) => {
+      try {
+        console.log(`[${username}] Nhận packet Resource Pack -> Gửi ACCEPTED và LOADED.`);
+        const payloadAccepted = { result: 3 }; // 3 = ACCEPTED
+        const payloadLoaded = { result: 0 };   // 0 = SUCCESSFULLY_LOADED
+
+        if (data.uuid) {
+          payloadAccepted.uuid = data.uuid;
+          payloadLoaded.uuid = data.uuid;
+        }
+        if (data.hash) {
+          payloadAccepted.hash = data.hash;
+          payloadLoaded.hash = data.hash;
+        }
+
+        bot._client.write('resource_pack_receive', payloadAccepted);
+        setTimeout(() => {
+          bot._client.write('resource_pack_receive', payloadLoaded);
+        }, 500);
+      } catch (err) {
+        // Bỏ qua nếu socket đóng
+      }
+    };
+
+    bot._client.on('resource_pack_send', handlePackPacket);
+    bot._client.on('add_resource_pack', handlePackPacket);
+  }
+}
+
+// ==========================================
+// 4. XỬ LÝ AUTO-LOGIN (AUTHME / NLOGIN)
+// ==========================================
+function setupAutoLogin(bot, username, updateStatus) {
+  let isDoneLogin = false;
+
+  const performAuth = () => {
+    if (isDoneLogin) return;
+    console.log(`[${username}] Tự động thực hiện xác thực tài khoản...`);
+    bot.chat(`/login ${CONFIG.botPassword}`);
+    setTimeout(() => {
+      bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
+    }, 1500);
+  };
 
   bot.on('spawn', () => {
-    console.log('[Bot] Đã vào thế giới (spawn)!');
-    botStatus.lastEvent = 'Đã vào thế giới game';
-    botStatus.updatedAt = new Date().toISOString();
+    setTimeout(performAuth, 2000);
+  });
 
-    // Tự động gửi lệnh login nếu có cấu hình
-    if (CONFIG.loginCommand) {
-      setTimeout(() => {
-        bot.chat(CONFIG.loginCommand);
-        console.log(`[Bot] Đã gửi lệnh xác thực: ${CONFIG.loginCommand}`);
-      }, 2000);
+  bot.on('message', (jsonMsg) => {
+    const text = jsonMsg.toString().toLowerCase();
+
+    if (text.includes('/register') || text.includes('dang ky') || text.includes('đăng ký')) {
+      console.log(`[${username}] Server yêu cầu /register -> Đang gửi lệnh...`);
+      bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
+      isDoneLogin = true;
+      updateStatus(true, true, 'Đã gửi /register');
+    } else if (text.includes('/login') || text.includes('dang nhap') || text.includes('đăng nhập')) {
+      console.log(`[${username}] Server yêu cầu /login -> Đang gửi lệnh...`);
+      bot.chat(`/login ${CONFIG.botPassword}`);
+      isDoneLogin = true;
+      updateStatus(true, true, 'Đã gửi /login');
+    } else if (text.includes('thành công') || text.includes('success') || text.includes('logged in')) {
+      isDoneLogin = true;
+      updateStatus(true, true, 'Đã đăng nhập thành công vào server');
+    }
+  });
+}
+
+// ==========================================
+// 5. KHỞI TẠO VÀ QUẢN LÝ TỪNG BOT
+// ==========================================
+function createManagedBot(username) {
+  let bot = null;
+  let antiAfkInterval = null;
+
+  function updateStatus(connected, loggedIn, eventText) {
+    botsStatus[username] = {
+      connected,
+      loggedIn,
+      lastEvent: eventText,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function start() {
+    console.log(`[${username}] Đang kết nối tới ${CONFIG.host}:${CONFIG.port}...`);
+    updateStatus(false, false, `Đang kết nối tới ${CONFIG.host}:${CONFIG.port}`);
+
+    try {
+      bot = mineflayer.createBot({
+        host: CONFIG.host,
+        port: CONFIG.port,
+        username: username,
+        version: CONFIG.version
+      });
+    } catch (err) {
+      console.error(`[${username}] Lỗi khi khởi tạo:`, err.message);
+      scheduleReconnect();
+      return;
     }
 
-    // Cơ chế chống AFK kick: Cứ 30 giây xoay nhẹ góc nhìn
-    if (antiAfkInterval) clearInterval(antiAfkInterval);
-    antiAfkInterval = setInterval(() => {
-      if (bot && bot.entity) {
-        bot.look(bot.entity.yaw + 0.15, bot.entity.pitch, true);
+    setupResourcePackBypass(bot, username);
+    setupAutoLogin(bot, username, updateStatus);
+
+    bot.on('login', () => {
+      console.log(`[${username}] Đã vượt qua handshake và login vào server.`);
+      updateStatus(true, false, 'Đã kết nối vào server');
+    });
+
+    bot.on('spawn', () => {
+      console.log(`[${username}] Đã spawn vào thế giới game!`);
+      updateStatus(true, false, 'Đã vào thế giới game');
+
+      if (antiAfkInterval) clearInterval(antiAfkInterval);
+      antiAfkInterval = setInterval(() => {
+        if (bot && bot.entity) {
+          const deltaYaw = (Math.random() * 0.4 - 0.2);
+          bot.look(bot.entity.yaw + deltaYaw, bot.entity.pitch, true);
+        }
+      }, 30000);
+    });
+
+    bot.on('kicked', (reason) => {
+      console.warn(`[${username}] Bị kick khỏi server:`, reason);
+      updateStatus(false, false, `Bị kick: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`);
+    });
+
+    bot.on('error', (err) => {
+      console.error(`[${username}] Lỗi mạng:`, err.message);
+      updateStatus(false, false, `Lỗi: ${err.message}`);
+    });
+
+    bot.on('end', (reason) => {
+      console.log(`[${username}] Kết nối bị ngắt (${reason}). Sẽ kết nối lại...`);
+      updateStatus(false, false, `Ngắt kết nối (${reason})`);
+
+      if (antiAfkInterval) {
+        clearInterval(antiAfkInterval);
+        antiAfkInterval = null;
       }
-    }, 30000);
-  });
 
-  bot.on('kicked', (reason) => {
-    console.warn('[Bot] Bị kick khỏi server:', reason);
-    botStatus.connected = false;
-    botStatus.lastEvent = `Bị kick: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`;
-    botStatus.updatedAt = new Date().toISOString();
-  });
+      scheduleReconnect();
+    });
+  }
 
-  bot.on('error', (err) => {
-    console.error('[Bot Lỗi mạng/kết nối]:', err.message);
-    botStatus.lastEvent = `Lỗi: ${err.message}`;
-    botStatus.updatedAt = new Date().toISOString();
-  });
+  function scheduleReconnect() {
+    const delay = CONFIG.reconnectDelayMs + Math.floor(Math.random() * 5000);
+    console.log(`[${username}] Sẽ thử kết nối lại sau ${Math.round(delay / 1000)}s...`);
+    setTimeout(() => {
+      start();
+    }, delay);
+  }
 
-  bot.on('end', (reason) => {
-    console.log(`[Bot] Kết nối bị ngắt (${reason}). Chuẩn bị kết nối lại...`);
-    botStatus.connected = false;
-    botStatus.lastEvent = `Ngắt kết nối (${reason})`;
-    botStatus.updatedAt = new Date().toISOString();
-
-    if (antiAfkInterval) {
-      clearInterval(antiAfkInterval);
-      antiAfkInterval = null;
-    }
-
-    scheduleReconnect();
-  });
+  start();
 }
 
-function scheduleReconnect() {
-  console.log(`[Bot] Sẽ kết nối lại sau ${CONFIG.reconnectDelayMs / 1000} giây...`);
+// Khởi chạy các bot cách nhau 5 giây
+console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot: ${BOT_NAMES.join(', ')}`);
+BOT_NAMES.forEach((name, index) => {
   setTimeout(() => {
-    startBot();
-  }, CONFIG.reconnectDelayMs);
-}
-
-// Bắt đầu chạy bot
-startBot();
+    createManagedBot(name);
+  }, index * 5000);
+});
