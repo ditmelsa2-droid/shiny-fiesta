@@ -305,9 +305,22 @@ function setupSmartSurvival(bot, username) {
     if (aiLoopTimer) clearInterval(aiLoopTimer);
     aiLoopTimer = setInterval(triggerAITactics, 20000);
     setTimeout(triggerAITactics, 4000);
+
+    // ĐỔI HƯỚNG NGẪU NHIÊN định kỳ mỗi 15-25s để không đi mãi 1 chiều
+    const randomTurnLoop = () => {
+      if (!bot || !bot.entity) return;
+      // Chỉ đổi hướng khi đang explore (không phải flee/fight)
+      if (currentAction === 'explore') {
+        currentYaw = Math.random() * Math.PI * 2;
+        bot.look(currentYaw, 0, true);
+        console.log(`[${username}] Đổi hướng ngẫu nhiên`);
+      }
+      setTimeout(randomTurnLoop, 15000 + Math.random() * 10000);
+    };
+    setTimeout(randomTurnLoop, 20000);
   });
 
-  // Tự xử lý vật lý vượt địa hình theo thời gian thực (60 ticks/s)
+  // Tự xử lý vật lý vượt địa hình theo thời gian thực
   bot.on('physicsTick', () => {
     if (!bot.entity) return;
 
@@ -320,16 +333,21 @@ function setupSmartSurvival(bot, username) {
 
     if (currentAction === 'explore' || currentAction === 'flee') {
       const speedHorizontal = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
+
       if (speedHorizontal < 0.02) {
         stuckTicks++;
-        // Nhảy để trèo bậc
+        // Nhảy để thử trèo bậc thấp
         bot.setControlState('jump', true);
 
-        // Kẹt tường -> đổi hướng rẽ
-        if (stuckTicks > 12) {
-          currentYaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2 + Math.random() * 0.4);
+        // Kẹt > 5 ticks (thay vì 12) → đổi hướng ngay lập tức, góc lớn hơn
+        if (stuckTicks > 5) {
+          // Quay 120°–180° để thoát khỏi vật cản lớn (cây, tường, vách núi)
+          const angle = (Math.PI * 2 / 3) + Math.random() * (Math.PI / 3); // 120°–180°
+          const turnDir = Math.random() > 0.5 ? 1 : -1;
+          currentYaw += turnDir * angle;
           bot.look(currentYaw, 0, true);
           stuckTicks = 0;
+          console.log(`[${username}] Kẹt! Đổi hướng ${Math.round(angle * 180 / Math.PI)}°`);
         }
       } else {
         stuckTicks = 0;
@@ -359,8 +377,12 @@ function setupSmartSurvival(bot, username) {
       bot.respawn();
       setTimeout(() => {
         currentAction = 'explore';
-        bot.setControlState('forward', true);
-        bot.setControlState('sprint', true);
+        // Hồi sinh xong chạy /rtp lại để ra khỏi spawn
+        bot.chat('/rtp');
+        setTimeout(() => {
+          bot.setControlState('forward', true);
+          bot.setControlState('sprint', true);
+        }, 3000);
       }, 3000);
     }, 2000);
   });
