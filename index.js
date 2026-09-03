@@ -5,19 +5,14 @@ const mineflayer = require('mineflayer');
 // 1. CẤU HÌNH SERVER & DANH SÁCH BOT
 // ==========================================
 const CONFIG = {
-  // Địa chỉ máy chủ (đã check SRV record)
   host: process.env.MC_HOST || 'node.healthrecords.id.vn',
-  // Cổng máy chủ (port SRV là 25641)
   port: parseInt(process.env.MC_PORT || '25641'),
-  // Tự động nhận diện phiên bản Minecraft
   version: false,
-  // Mật khẩu chung cho các bot đăng ký/đăng nhập
   botPassword: process.env.MC_BOT_PASSWORD || 'MatKhauBot123',
-  // Thời gian chờ trước khi kết nối lại nếu bị kick (mili-giây)
   reconnectDelayMs: 15000
 };
 
-// Danh sách tên bot giống người thật
+// Danh sách tên bot sinh tồn
 const BOT_NAMES = process.env.MC_USERNAMES 
   ? process.env.MC_USERNAMES.split(',').map(s => s.trim())
   : ['RayLight431', 'tuantuoitre'];
@@ -33,7 +28,7 @@ BOT_NAMES.forEach(name => {
   botsStatus[name] = {
     connected: false,
     loggedIn: false,
-    lastEvent: 'Khởi tạo...',
+    status: 'Khởi tạo...',
     updatedAt: new Date().toISOString()
   };
 });
@@ -41,7 +36,7 @@ BOT_NAMES.forEach(name => {
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
-    message: 'Hệ thống Minecraft AFK Bot (Bypass Pack & Auto-Login) đang chạy!',
+    message: 'Hệ thống Minecraft Autonomous Survival Bot đang chạy!',
     totalBots: BOT_NAMES.length,
     bots: botsStatus
   });
@@ -52,29 +47,22 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 3. XỬ LÝ RESOURCE PACK (BỎ QUA TẢI FILE NẶNG)
+// 3. RESOURCE PACK BYPASS (KHÔNG TẢI FILE NẶNG)
 // ==========================================
 function setupResourcePackBypass(bot, username) {
-  // 1. Xử lý qua API tiêu chuẩn của Mineflayer
-  bot.on('resourcePack', (url, hash) => {
-    console.log(`[${username}] Server yêu cầu Resource Pack -> Báo đã tải xong (không tải file nặng)...`);
+  bot.on('resourcePack', () => {
     try {
       if (typeof bot.acceptResourcePack === 'function') {
         bot.acceptResourcePack();
       }
-    } catch (e) {
-      console.warn(`[${username}] Lỗi acceptResourcePack:`, e.message);
-    }
+    } catch (e) {}
   });
 
-  // 2. Xử lý hook packet cấp thấp (Hỗ trợ từ 1.16 đến 1.20+ / 1.21+)
   if (bot._client) {
-    const handlePackPacket = (data) => {
+    const handlePack = (data) => {
       try {
-        console.log(`[${username}] Nhận packet Resource Pack -> Gửi ACCEPTED và LOADED.`);
-        const payloadAccepted = { result: 3 }; // 3 = ACCEPTED
-        const payloadLoaded = { result: 0 };   // 0 = SUCCESSFULLY_LOADED
-
+        const payloadAccepted = { result: 3 };
+        const payloadLoaded = { result: 0 };
         if (data.uuid) {
           payloadAccepted.uuid = data.uuid;
           payloadLoaded.uuid = data.uuid;
@@ -83,33 +71,31 @@ function setupResourcePackBypass(bot, username) {
           payloadAccepted.hash = data.hash;
           payloadLoaded.hash = data.hash;
         }
-
         bot._client.write('resource_pack_receive', payloadAccepted);
         setTimeout(() => {
           bot._client.write('resource_pack_receive', payloadLoaded);
         }, 500);
-      } catch (err) {
-        // Bỏ qua nếu socket đóng
-      }
+      } catch (err) {}
     };
 
-    bot._client.on('resource_pack_send', handlePackPacket);
-    bot._client.on('add_resource_pack', handlePackPacket);
+    bot._client.on('resource_pack_send', handlePack);
+    bot._client.on('add_resource_pack', handlePack);
   }
 }
 
 // ==========================================
-// 4. XỬ LÝ AUTO-LOGIN (AUTHME / NLOGIN)
+// 4. AUTO-LOGIN (AUTHME / NLOGIN)
 // ==========================================
-function setupAutoLogin(bot, username, updateStatus) {
+function setupAutoLogin(bot, username, onLoggedIn) {
   let isDoneLogin = false;
 
   const performAuth = () => {
     if (isDoneLogin) return;
-    console.log(`[${username}] Tự động thực hiện xác thực tài khoản...`);
     bot.chat(`/login ${CONFIG.botPassword}`);
     setTimeout(() => {
       bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
+      isDoneLogin = true;
+      if (onLoggedIn) onLoggedIn();
     }, 1500);
   };
 
@@ -119,36 +105,132 @@ function setupAutoLogin(bot, username, updateStatus) {
 
   bot.on('message', (jsonMsg) => {
     const text = jsonMsg.toString().toLowerCase();
-
     if (text.includes('/register') || text.includes('dang ky') || text.includes('đăng ký')) {
-      console.log(`[${username}] Server yêu cầu /register -> Đang gửi lệnh...`);
       bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
       isDoneLogin = true;
-      updateStatus(true, true, 'Đã gửi /register');
+      if (onLoggedIn) onLoggedIn();
     } else if (text.includes('/login') || text.includes('dang nhap') || text.includes('đăng nhập')) {
-      console.log(`[${username}] Server yêu cầu /login -> Đang gửi lệnh...`);
       bot.chat(`/login ${CONFIG.botPassword}`);
       isDoneLogin = true;
-      updateStatus(true, true, 'Đã gửi /login');
+      if (onLoggedIn) onLoggedIn();
     } else if (text.includes('thành công') || text.includes('success') || text.includes('logged in')) {
       isDoneLogin = true;
-      updateStatus(true, true, 'Đã đăng nhập thành công vào server');
+      if (onLoggedIn) onLoggedIn();
     }
   });
 }
 
 // ==========================================
-// 5. KHỞI TẠO VÀ QUẢN LÝ TỪNG BOT
+// 5. AUTONOMOUS SURVIVAL ENGINE (ĐI SINH TỒN, KHÁM PHÁ, TỰ VỆ)
+// ==========================================
+function setupSurvivalEngine(bot, username, updateStatus) {
+  let isExploring = false;
+  let currentYaw = Math.random() * Math.PI * 2;
+  let stuckTicks = 0;
+  let exploreInterval = null;
+
+  function startExploring() {
+    if (isExploring) return;
+    isExploring = true;
+    console.log(`[${username}] Bắt đầu hành trình sinh tồn: Rời spawn và đi khám phá thế giới!`);
+    updateStatus(true, true, 'Đang đi khám phá & sinh tồn tự do');
+
+    // Chọn một hướng ngẫu nhiên để rời xa spawn
+    currentYaw = Math.random() * Math.PI * 2;
+    bot.look(currentYaw, 0, true);
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', true);
+
+    // Cứ mỗi 15-20 giây đổi hướng nhẹ để lượn theo địa hình tự nhiên
+    if (exploreInterval) clearInterval(exploreInterval);
+    exploreInterval = setInterval(() => {
+      if (!bot || !bot.entity) return;
+      currentYaw += (Math.random() * 1.4 - 0.7);
+      bot.look(currentYaw, 0, true);
+
+      // Thi thoảng vung tay như đang cầm đuốc/vũ khí
+      if (Math.random() < 0.3) {
+        bot.swingArm();
+      }
+    }, 15000);
+  }
+
+  // Tự động xử lý vật lý vượt địa hình
+  bot.on('physicsTick', () => {
+    if (!isExploring || !bot.entity) return;
+
+    // 1. Tự bơi ngoi lên nếu rơi xuống nước
+    if (bot.entity.isInWater) {
+      bot.setControlState('jump', true);
+      bot.setControlState('sprint', false);
+      return;
+    }
+
+    // 2. Kiểm tra nếu bị vướng block phía trước (vận tốc di chuyển gần bằng 0)
+    const velocityHorizontal = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
+    if (velocityHorizontal < 0.02) {
+      stuckTicks++;
+      // Nhảy thử để trèo lên block 1 bậc
+      bot.setControlState('jump', true);
+
+      // Nếu kẹt lâu (tường cao, chướng ngại vật) -> quay ngoắt sang hướng khác
+      if (stuckTicks > 12) {
+        currentYaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2 + (Math.random() * 0.4));
+        bot.look(currentYaw, 0, true);
+        stuckTicks = 0;
+      }
+    } else {
+      stuckTicks = 0;
+      bot.setControlState('jump', false);
+      bot.setControlState('sprint', true);
+      bot.setControlState('forward', true);
+    }
+
+    // 3. Tự vệ nếu có quái vật lại gần trong 3.5 block
+    const hostileMob = bot.nearestEntity((e) => {
+      return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.5;
+    });
+    if (hostileMob) {
+      bot.lookAt(hostileMob.position.offset(0, hostileMob.height * 0.5, 0), true);
+      bot.attack(hostileMob);
+    }
+  });
+
+  // Khi chết: Tự động hồi sinh sau 2 giây và tiếp tục chạy đi sinh tồn tiếp
+  bot.on('death', () => {
+    console.log(`[${username}] Bot bị chết. Tự động hồi sinh sau 2 giây...`);
+    updateStatus(true, true, 'Đã tử nạn -> Đang tự hồi sinh');
+    isExploring = false;
+    bot.clearControlStates();
+
+    setTimeout(() => {
+      bot.respawn();
+      setTimeout(startExploring, 3000);
+    }, 2000);
+  });
+
+  bot.on('end', () => {
+    isExploring = false;
+    if (exploreInterval) {
+      clearInterval(exploreInterval);
+      exploreInterval = null;
+    }
+  });
+
+  return { startExploring };
+}
+
+// ==========================================
+// 6. KHỞI TẠO VÀ QUẢN LÝ TỪNG BOT
 // ==========================================
 function createManagedBot(username) {
   let bot = null;
-  let antiAfkInterval = null;
 
-  function updateStatus(connected, loggedIn, eventText) {
+  function updateStatus(connected, loggedIn, statusText) {
     botsStatus[username] = {
       connected,
       loggedIn,
-      lastEvent: eventText,
+      status: statusText,
       updatedAt: new Date().toISOString()
     };
   }
@@ -171,52 +253,49 @@ function createManagedBot(username) {
     }
 
     setupResourcePackBypass(bot, username);
-    setupAutoLogin(bot, username, updateStatus);
+
+    const survivalEngine = setupSurvivalEngine(bot, username, updateStatus);
+
+    // Đăng nhập xong là chuẩn bị cắm đầu chạy
+    setupAutoLogin(bot, username, () => {
+      console.log(`[${username}] Đăng nhập hoàn tất! Bắt đầu xuất phát...`);
+      setTimeout(() => {
+        survivalEngine.startExploring();
+      }, 3000);
+    });
 
     bot.on('login', () => {
-      console.log(`[${username}] Đã vượt qua handshake và login vào server.`);
-      updateStatus(true, false, 'Đã kết nối vào server');
+      console.log(`[${username}] Đã kết nối vào server.`);
+      updateStatus(true, false, 'Đã vào server');
     });
 
     bot.on('spawn', () => {
-      console.log(`[${username}] Đã spawn vào thế giới game!`);
-      updateStatus(true, false, 'Đã vào thế giới game');
-
-      if (antiAfkInterval) clearInterval(antiAfkInterval);
-      antiAfkInterval = setInterval(() => {
-        if (bot && bot.entity) {
-          const deltaYaw = (Math.random() * 0.4 - 0.2);
-          bot.look(bot.entity.yaw + deltaYaw, bot.entity.pitch, true);
-        }
-      }, 30000);
+      console.log(`[${username}] Đã spawn vào thế giới.`);
+      // Dự phòng nếu không có plugin login thì 5s sau tự chạy luôn
+      setTimeout(() => {
+        survivalEngine.startExploring();
+      }, 5000);
     });
 
     bot.on('kicked', (reason) => {
-      console.warn(`[${username}] Bị kick khỏi server:`, reason);
+      console.warn(`[${username}] Bị kick:`, reason);
       updateStatus(false, false, `Bị kick: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`);
     });
 
     bot.on('error', (err) => {
-      console.error(`[${username}] Lỗi mạng:`, err.message);
+      console.error(`[${username}] Lỗi:`, err.message);
       updateStatus(false, false, `Lỗi: ${err.message}`);
     });
 
     bot.on('end', (reason) => {
-      console.log(`[${username}] Kết nối bị ngắt (${reason}). Sẽ kết nối lại...`);
+      console.log(`[${username}] Ngắt kết nối (${reason}). Sẽ kết nối lại...`);
       updateStatus(false, false, `Ngắt kết nối (${reason})`);
-
-      if (antiAfkInterval) {
-        clearInterval(antiAfkInterval);
-        antiAfkInterval = null;
-      }
-
       scheduleReconnect();
     });
   }
 
   function scheduleReconnect() {
     const delay = CONFIG.reconnectDelayMs + Math.floor(Math.random() * 5000);
-    console.log(`[${username}] Sẽ thử kết nối lại sau ${Math.round(delay / 1000)}s...`);
     setTimeout(() => {
       start();
     }, delay);
@@ -225,8 +304,7 @@ function createManagedBot(username) {
   start();
 }
 
-// Khởi chạy các bot cách nhau 5 giây
-console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot: ${BOT_NAMES.join(', ')}`);
+console.log(`[Hệ thống] Đang khởi chạy ${BOT_NAMES.length} bot sinh tồn: ${BOT_NAMES.join(', ')}`);
 BOT_NAMES.forEach((name, index) => {
   setTimeout(() => {
     createManagedBot(name);
