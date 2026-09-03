@@ -92,23 +92,50 @@ function setupResourcePackBypass(bot, username) {
 }
 
 // ==========================================
-// 4. AUTO-LOGIN (AUTHME / NLOGIN)
+// 4. AUTO-LOGIN + TỰ ĐI VÀO WORLD SURVIVAL
 // ==========================================
+
+// Danh sách lệnh thử lần lượt để vào world survival
+// Thêm /warp, /world, /go, v.v. theo server của bạn
+const WORLD_CMDS = (process.env.MC_WORLD_CMDS || '/rtp')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 function setupAutoLogin(bot, username, onLoggedIn) {
   let isDoneLogin = false;
+  let hasEnteredWorld = false;
+
+  // Sau khi login xong → tự vào survival world
+  const goToSurvivalWorld = () => {
+    if (hasEnteredWorld) return;
+    hasEnteredWorld = true;
+    console.log(`[${username}] Login xong! Thử vào survival world...`);
+
+    // Thử từng lệnh cách nhau 2.5s cho đến khi vào được
+    WORLD_CMDS.forEach((cmd, i) => {
+      setTimeout(() => {
+        if (!bot || !bot.entity) return;
+        console.log(`[${username}] Thử lệnh world: ${cmd}`);
+        bot.chat(cmd);
+      }, i * 2500);
+    });
+
+    // Sau khi thử hết lệnh → bắt đầu di chuyển dù sao đi nữa
+    setTimeout(() => {
+      console.log(`[${username}] Bắt đầu sinh tồn!`);
+      if (onLoggedIn) onLoggedIn();
+    }, WORLD_CMDS.length * 2500 + 1500);
+  };
 
   const performAuth = () => {
     if (isDoneLogin) return;
     bot.chat(`/login ${CONFIG.botPassword}`);
     setTimeout(() => {
       bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
-      isDoneLogin = true;
-      if (onLoggedIn) onLoggedIn();
     }, 1500);
   };
 
   bot.on('spawn', () => {
-    // Đóng window 0 (inventory/GUI mặc định) ngay khi spawn phòng bị block
+    // Đóng window 0 (inventory/GUI mặc định) ngay khi spawn
     setTimeout(() => {
       try { bot._client && bot._client.write('close_window', { windowId: 0 }); } catch (_) {}
     }, 500);
@@ -117,17 +144,26 @@ function setupAutoLogin(bot, username, onLoggedIn) {
 
   bot.on('message', (jsonMsg) => {
     const text = jsonMsg.toString().toLowerCase();
+
+    // Xử lý prompt đăng ký/đăng nhập
     if (text.includes('/register') || text.includes('dang ky') || text.includes('đăng ký')) {
       bot.chat(`/register ${CONFIG.botPassword} ${CONFIG.botPassword}`);
-      isDoneLogin = true;
-      if (onLoggedIn) onLoggedIn();
+      if (!isDoneLogin) { isDoneLogin = true; setTimeout(goToSurvivalWorld, 1500); }
     } else if (text.includes('/login') || text.includes('dang nhap') || text.includes('đăng nhập')) {
       bot.chat(`/login ${CONFIG.botPassword}`);
-      isDoneLogin = true;
-      if (onLoggedIn) onLoggedIn();
+      if (!isDoneLogin) { isDoneLogin = true; setTimeout(goToSurvivalWorld, 2000); }
     } else if (text.includes('thành công') || text.includes('success') || text.includes('logged in')) {
-      isDoneLogin = true;
-      if (onLoggedIn) onLoggedIn();
+      if (!isDoneLogin) { isDoneLogin = true; setTimeout(goToSurvivalWorld, 1000); }
+    }
+
+    // Detect khi teleport world thành công (server thường báo kiểu này)
+    if (
+      text.includes('teleport') || text.includes('dich chuyen') || text.includes('dịch chuyển') ||
+      text.includes('world') || text.includes('welcome') || text.includes('chào mừng')
+    ) {
+      if (!hasEnteredWorld) {
+        console.log(`[${username}] Phát hiện đã vào world! (${text.substring(0, 60)})`);
+      }
     }
   });
 }
