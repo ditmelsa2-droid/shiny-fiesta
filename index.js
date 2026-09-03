@@ -51,39 +51,43 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 3. RESOURCE PACK BYPASS (KHÔNG TẢI FILE NẶNG)
+// 3. RESOURCE PACK BYPASS (KHÔNG TẢI FILE NẶNG - FIX ĐỨNG IM)
 // ==========================================
 function setupResourcePackBypass(bot, username) {
+  // HIGH-LEVEL API fallback
   bot.on('resourcePack', () => {
-    try {
-      if (typeof bot.acceptResourcePack === 'function') {
-        bot.acceptResourcePack();
-      }
-    } catch (e) {}
+    try { if (typeof bot.acceptResourcePack === 'function') bot.acceptResourcePack(); } catch (e) {}
   });
 
   if (bot._client) {
     const handlePack = (data) => {
       try {
-        const payloadAccepted = { result: 3 };
-        const payloadLoaded = { result: 0 };
-        if (data.uuid) {
-          payloadAccepted.uuid = data.uuid;
-          payloadLoaded.uuid = data.uuid;
-        }
-        if (data.hash) {
-          payloadAccepted.hash = data.hash;
-          payloadLoaded.hash = data.hash;
-        }
-        bot._client.write('resource_pack_receive', payloadAccepted);
+        const makePayload = (result) => {
+          const p = { result };
+          if (data.uuid) p.uuid = data.uuid;
+          if (data.hash) p.hash = data.hash;
+          return p;
+        };
+        // result 3 = ACCEPTED ngay lập tức
+        bot._client.write('resource_pack_receive', makePayload(3));
+        // 300ms sau: SUCCESSFULLY_LOADED → server mở lock, bot đi lại được
         setTimeout(() => {
-          bot._client.write('resource_pack_receive', payloadLoaded);
-        }, 500);
+          try { bot._client.write('resource_pack_receive', makePayload(0)); } catch (_) {}
+        }, 300);
       } catch (err) {}
     };
 
     bot._client.on('resource_pack_send', handlePack);
     bot._client.on('add_resource_pack', handlePack);
+
+    // Auto-close bất kỳ GUI/menu nào server mở (menu chọn kit, xác nhận pack, v.v.)
+    bot._client.on('open_window', (data) => {
+      try {
+        setTimeout(() => {
+          try { bot._client.write('close_window', { windowId: data.windowId || 0 }); } catch (_) {}
+        }, 250);
+      } catch (e) {}
+    });
   }
 }
 
@@ -104,6 +108,10 @@ function setupAutoLogin(bot, username, onLoggedIn) {
   };
 
   bot.on('spawn', () => {
+    // Đóng window 0 (inventory/GUI mặc định) ngay khi spawn phòng bị block
+    setTimeout(() => {
+      try { bot._client && bot._client.write('close_window', { windowId: 0 }); } catch (_) {}
+    }, 500);
     setTimeout(performAuth, 2000);
   });
 
@@ -158,6 +166,7 @@ Decide your next action. You must reply ONLY with a valid JSON object matching t
     const data = await response.json();
     if (data && data.choices && data.choices[0] && data.choices[0].message) {
       const content = data.choices[0].message.content.trim();
+      // Tìm đoạn JSON trong câu trả lời
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
@@ -194,6 +203,7 @@ function setupSmartSurvival(bot, username) {
     if (!bot || !bot.entity || isThinking) return;
     isThinking = true;
 
+    // 1. Thu thập dữ liệu giác quan
     const nearestMob = bot.nearestEntity((e) => {
       return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 16;
     });
@@ -213,6 +223,7 @@ function setupSmartSurvival(bot, username) {
       z: Math.round(bot.entity.position.z)
     };
 
+    // 2. Hỏi bộ não AI
     const decision = await askAIBrain(username, sensoryData);
     isThinking = false;
 
@@ -222,6 +233,7 @@ function setupSmartSurvival(bot, username) {
       updateStatusUI(decision.thought, decision.action);
 
       if (decision.action === 'flee' && nearestMob) {
+        // Tháo chạy: quay lưng 180 độ so với quái vật
         const dx = bot.entity.position.x - nearestMob.position.x;
         const dz = bot.entity.position.z - nearestMob.position.z;
         currentYaw = Math.atan2(-dx, dz);
@@ -229,13 +241,16 @@ function setupSmartSurvival(bot, username) {
         bot.setControlState('sprint', true);
         bot.setControlState('forward', true);
       } else if (decision.action === 'fight' && nearestMob) {
+        // Chiến đấu
         bot.lookAt(nearestMob.position.offset(0, nearestMob.height * 0.5, 0), true);
         bot.attack(nearestMob);
       } else if (decision.action === 'watch_player' && nearestPlayer) {
+        // Tò mò nhìn người chơi
         bot.setControlState('forward', false);
         bot.lookAt(nearestPlayer.position.offset(0, 1.6, 0), true);
         if (Math.random() < 0.4) bot.swingArm();
       } else {
+        // Mặc định là đi khám phá
         currentAction = 'explore';
         bot.setControlState('sprint', true);
         bot.setControlState('forward', true);
@@ -250,14 +265,17 @@ function setupSmartSurvival(bot, username) {
     bot.setControlState('forward', true);
     bot.setControlState('sprint', true);
 
+    // Kích hoạt chu kỳ suy nghĩ AI mỗi 20 giây
     if (aiLoopTimer) clearInterval(aiLoopTimer);
     aiLoopTimer = setInterval(triggerAITactics, 20000);
     setTimeout(triggerAITactics, 4000);
   });
 
+  // Tự xử lý vật lý vượt địa hình theo thời gian thực (60 ticks/s)
   bot.on('physicsTick', () => {
     if (!bot.entity) return;
 
+    // Bơi nếu rơi xuống nước
     if (bot.entity.isInWater) {
       bot.setControlState('jump', true);
       bot.setControlState('sprint', false);
@@ -268,8 +286,10 @@ function setupSmartSurvival(bot, username) {
       const speedHorizontal = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
       if (speedHorizontal < 0.02) {
         stuckTicks++;
+        // Nhảy để trèo bậc
         bot.setControlState('jump', true);
 
+        // Kẹt tường -> đổi hướng rẽ
         if (stuckTicks > 12) {
           currentYaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI / 2 + Math.random() * 0.4);
           bot.look(currentYaw, 0, true);
@@ -283,6 +303,7 @@ function setupSmartSurvival(bot, username) {
       }
     }
 
+    // Tự vệ tức thì nếu quái vật vào tầm đánh 3.2 block
     const closeMonster = bot.nearestEntity((e) => {
       return (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.2;
     });
@@ -292,6 +313,7 @@ function setupSmartSurvival(bot, username) {
     }
   });
 
+  // Khi chết: Tự hồi sinh và kích hoạt lại AI
   bot.on('death', () => {
     console.log(`[${username}] Bot bị chết. Tự động hồi sinh sau 2s...`);
     updateStatusUI('Vừa tử nạn, đang hồi sinh...', 'respawning');
