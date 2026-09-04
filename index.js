@@ -133,13 +133,29 @@ async function askAI(username, data) {
 }
 
 // ==========================================
-// 6. SURVIVAL LOGIC
+// 6. SURVIVAL LOGIC (LOW-PACKET / CHỐNG EXPLOITFIXER)
 // ==========================================
 function setupSurvival(bot, username) {
   let action = 'explore';
   let yaw = Math.random() * Math.PI * 2;
-  let stuck = 0;
+  let isChopping = false;
+  let lastAttackTime = 0;
+  let lastPos = null;
+  let stuckCount = 0;
+
   let aiTimer = null;
+  let wanderTimer = null;
+  let stuckInterval = null;
+  let combatInterval = null;
+  let chopInterval = null;
+
+  function clearAllTimers() {
+    if (aiTimer) { clearInterval(aiTimer); aiTimer = null; }
+    if (wanderTimer) { clearTimeout(wanderTimer); wanderTimer = null; }
+    if (stuckInterval) { clearInterval(stuckInterval); stuckInterval = null; }
+    if (combatInterval) { clearInterval(combatInterval); combatInterval = null; }
+    if (chopInterval) { clearInterval(chopInterval); chopInterval = null; }
+  }
 
   const sense = () => {
     const mob = bot.nearestEntity(e => (e.type === 'mob' || e.type === 'hostile') && bot.entity?.position.distanceTo(e.position) < 16);
@@ -156,7 +172,7 @@ function setupSurvival(bot, username) {
   };
 
   const think = async () => {
-    if (!bot.entity) return;
+    if (!bot.entity || isChopping) return;
     const s = sense();
     const d = await askAI(username, s);
     if (!d) return;
@@ -168,144 +184,145 @@ function setupSurvival(bot, username) {
       const dx = bot.entity.position.x - s.mob.position.x;
       const dz = bot.entity.position.z - s.mob.position.z;
       yaw = Math.atan2(-dx, dz);
-      bot.look(yaw, 0, true);
-      bot.setControlState('sprint', true);
+      bot.look(yaw, 0, false);
       bot.setControlState('forward', true);
     } else if (d.action === 'fight' && s.mob) {
-      bot.lookAt(s.mob.position.offset(0, s.mob.height * 0.5, 0), true);
-      bot.attack(s.mob);
+      bot.lookAt(s.mob.position.offset(0, s.mob.height * 0.5, 0), false);
     } else {
       action = 'explore';
-      bot.setControlState('sprint', true);
       bot.setControlState('forward', true);
     }
   };
 
   bot.on('spawn', () => {
-    console.log(`[${username}] Spawned! Bắt đầu chạy...`);
+    console.log(`[${username}] Spawned! Bắt đầu di chuyển sinh tồn...`);
     botsStatus[username].connected = true;
-    yaw = Math.random() * Math.PI * 2;
-    bot.look(yaw, 0, true);
-    bot.setControlState('forward', true);
-    bot.setControlState('sprint', true);
+    clearAllTimers();
 
-    // AI mỗi 20s
-    if (aiTimer) clearInterval(aiTimer);
+    // Đi bộ bình thường (KHÔNG bật sprint liên tục để tránh spam ServerboundPlayerCommandPacket)
+    yaw = Math.random() * Math.PI * 2;
+    bot.look(yaw, 0, false);
+    bot.setControlState('forward', true);
+    bot.setControlState('sprint', false);
+
+    // AI chu kỳ mỗi 20s
     aiTimer = setInterval(think, 20000);
     setTimeout(think, 5000);
 
-    // Đổi hướng random mỗi 15–25s để không kẹt 1 chỗ mãi
+    // Đổi hướng ngẫu nhiên mỗi 15–30s
     const wander = () => {
-      if (!bot.entity || action !== 'explore') { setTimeout(wander, 20000); return; }
+      if (!bot.entity || action !== 'explore' || isChopping) {
+        wanderTimer = setTimeout(wander, 15000);
+        return;
+      }
       yaw = Math.random() * Math.PI * 2;
-      bot.look(yaw, 0, true);
-      setTimeout(wander, 15000 + Math.random() * 10000);
+      bot.look(yaw, 0, false);
+      wanderTimer = setTimeout(wander, 15000 + Math.random() * 15000);
     };
-    setTimeout(wander, 20000);
+    wanderTimer = setTimeout(wander, 20000);
 
-    // ===== TỰ CHẶT CÂY =====
-    // Các loại block gỗ trong Minecraft 1.21.x
+    // KIỂM TRA KẸT MỖI 700ms (Thay vì 20 lần/giây ở physicsTick để không spam packet)
+    stuckInterval = setInterval(() => {
+      if (!bot.entity || action !== 'explore' || isChopping) return;
+
+      if (lastPos) {
+        const dist = bot.entity.position.distanceTo(lastPos);
+        if (dist < 0.2) {
+          stuckCount++;
+          if (stuckCount === 1) {
+            // Nhảy 1 nhịp nhẹ để vượt bậc
+            bot.setControlState('jump', true);
+            setTimeout(() => {
+              try { bot.setControlState('jump', false); } catch (_) {}
+            }, 300);
+          } else if (stuckCount >= 2) {
+            // Kẹt cọc/cây/tường -> đổi hướng rẽ góc rộng
+            yaw += (Math.random() > 0.5 ? 1 : -1) * (Math.PI * 0.6 + Math.random() * 0.4);
+            bot.look(yaw, 0, false);
+            stuckCount = 0;
+          }
+        } else {
+          stuckCount = 0;
+        }
+      }
+      if (bot.entity) lastPos = bot.entity.position.clone();
+    }, 700);
+
+    // CHIẾN ĐẤU VỚI COOLDOWN (Chỉ đánh tối đa 1 lần mỗi giây)
+    combatInterval = setInterval(() => {
+      if (!bot.entity || isChopping) return;
+      const now = Date.now();
+      if (now - lastAttackTime < 1000) return;
+
+      const near = bot.nearestEntity(e =>
+        (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.2);
+      if (near) {
+        bot.lookAt(near.position.offset(0, near.height * 0.5, 0), false);
+        bot.attack(near);
+        lastAttackTime = now;
+      }
+    }, 1000);
+
+    // ===== TỰ CHẶT CÂY (KIỂM TRA MỖI 4 GIÂY) =====
     const LOG_TYPES = [
       'oak_log','birch_log','spruce_log','jungle_log','acacia_log',
       'dark_oak_log','mangrove_log','cherry_log','bamboo_block',
       'oak_wood','birch_wood','spruce_wood','jungle_wood',
     ];
-    let isChopping = false;
 
     const chopNearbyTree = async () => {
-      if (isChopping || !bot.entity || action === 'flee') return;
+      if (isChopping || !bot.entity || action === 'flee' || action === 'fight') return;
 
-      // Tìm log block trong vòng 4 block
       const logBlock = bot.findBlock({
         matching: (b) => LOG_TYPES.includes(b.name),
-        maxDistance: 4,
-        count: 1
+        maxDistance: 3,
       });
-
       if (!logBlock) return;
 
       isChopping = true;
-      try {
-        // Nhìn vào block gỗ
-        await bot.lookAt(logBlock.position.offset(0.5, 0.5, 0.5), true);
-        bot.setControlState('forward', false);
-        bot.setControlState('sprint', false);
+      const prevAction = action;
+      action = 'chop';
+      bot.clearControlStates();
 
-        // Đào block (tự động dùng tay hoặc rìu nếu có)
+      try {
+        await bot.lookAt(logBlock.position.offset(0.5, 0.5, 0.5), false);
+        console.log(`[${username}] Đang chặt ${logBlock.name}...`);
         await bot.dig(logBlock);
-        console.log(`[${username}] Đã chặt: ${logBlock.name}`);
-      } catch (e) {
-        // Không đào được (quá xa, bị chặn, v.v.) → tiếp tục đi
+        console.log(`[${username}] ✓ Chặt xong ${logBlock.name}`);
+      } catch (_) {
       } finally {
         isChopping = false;
-        // Sau khi chặt xong → tiếp tục chạy
-        bot.setControlState('sprint', true);
+        action = prevAction || 'explore';
         bot.setControlState('forward', true);
       }
     };
 
-    // Kiểm tra cây gần đó mỗi 3s
-    setInterval(() => {
-      chopNearbyTree();
-    }, 3000);
+    chopInterval = setInterval(chopNearbyTree, 4000);
   });
 
+  // physicsTick chỉ duy nhất xử lý bơi nước (không spam gói tin)
   bot.on('physicsTick', () => {
     if (!bot.entity) return;
-
-    // Bơi
     if (bot.entity.isInWater) {
       bot.setControlState('jump', true);
-      bot.setControlState('sprint', false);
-      return;
-    }
-
-    if (action === 'explore' || action === 'flee') {
-      const spd = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z);
-      if (spd < 0.02) {
-        stuck++;
-        bot.setControlState('jump', true);
-        if (stuck > 5) {                               // Kẹt 5 ticks → quay 120–180°
-          const a = (2 * Math.PI / 3) + Math.random() * (Math.PI / 3);
-          yaw += (Math.random() > 0.5 ? 1 : -1) * a;
-          bot.look(yaw, 0, true);
-          stuck = 0;
-        }
-      } else {
-        stuck = 0;
-        bot.setControlState('jump', false);
-        bot.setControlState('sprint', true);
-        bot.setControlState('forward', true);
-      }
-    }
-
-    // Tự đánh mob gần
-    const near = bot.nearestEntity(e =>
-      (e.type === 'mob' || e.type === 'hostile') && bot.entity.position.distanceTo(e.position) < 3.2);
-    if (near) {
-      bot.lookAt(near.position.offset(0, near.height * 0.5, 0), true);
-      bot.attack(near);
     }
   });
 
   bot.on('death', () => {
     console.log(`[${username}] Chết! Hồi sinh...`);
+    clearAllTimers();
     bot.clearControlStates();
     setTimeout(() => {
       bot.respawn();
       setTimeout(() => {
         action = 'explore';
         try { bot.chat('/rtp'); } catch (_) {}
-        setTimeout(() => {
-          bot.setControlState('forward', true);
-          bot.setControlState('sprint', true);
-        }, 3000);
       }, 3000);
     }, 2000);
   });
 
   bot.on('end', () => {
-    if (aiTimer) { clearInterval(aiTimer); aiTimer = null; }
+    clearAllTimers();
     botsStatus[username].connected = false;
   });
 }
